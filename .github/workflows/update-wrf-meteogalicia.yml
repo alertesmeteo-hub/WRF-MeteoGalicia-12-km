@@ -1,0 +1,100 @@
+name: Mise à jour WRF MeteoGalicia 12 km
+
+# Runs de 00 h et 12 h UTC, disponibles quelques heures plus tard : plusieurs passages par run, l'archive est idempotente
+# (un run déjà publié est conservé tel quel).
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'config/**', 'requirements.txt', '.github/workflows/update-wrf-meteogalicia.yml']
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "Forcer un run (AAAAMMJJHH), sinon le plus récent"
+        required: false
+  schedule:
+    - cron: '40 4,6,16,18 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-wrf-meteogalicia
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Construire les prévisions WRF
+        id: build
+        env:
+          RUN: ${{ inputs.run }}
+        run: |
+          args=()
+          if [ -n "$RUN" ]; then args+=(--run "$RUN"); fi
+          set +e
+          python scripts/update_wrf_meteogalicia.py "${args[@]}"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          elif [ "$status" -eq 2 ]; then
+            echo '::warning::Aucun run WRF utilisable : publication ignorée, dernières données valides conservées.'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            exit "$status"
+          fi
+      - name: Publier la branche data
+        if: steps.build.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          source_dir="$PWD/build"
+          publish_dir="$(mktemp -d)"
+          git -C "$publish_dir" init -b data
+          git -C "$publish_dir" remote add origin "https://github.com/$REPOSITORY.git"
+          git -C "$publish_dir" config credential.helper "!f() { if [ \"\$1\" = get ]; then echo username=x-access-token; echo password=\$GH_TOKEN; fi; }; f"
+          git -C "$publish_dir" config user.name 'github-actions[bot]'
+          git -C "$publish_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4; do
+            if git ls-remote --exit-code --heads "https://github.com/$REPOSITORY.git" data >/dev/null; then
+              git -C "$publish_dir" fetch --depth=1 origin data
+              git -C "$publish_dir" reset --hard FETCH_HEAD
+              decision="$(python - "$source_dir/index.json" "$publish_dir/index.json" <<'PY'
+          import json, sys
+          nouveau = json.load(open(sys.argv[1], encoding='utf-8')).get('model_run', '')
+          try:
+              ancien = json.load(open(sys.argv[2], encoding='utf-8')).get('model_run', '')
+          except OSError:
+              ancien = ''
+          print('skip' if ancien >= nouveau else 'publish')
+          PY
+              )"
+              if [ "$decision" = 'skip' ]; then
+                echo 'Un run identique ou plus récent est déjà publié : conservé.' >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              git -C "$publish_dir" rm -r --ignore-unmatch .
+            fi
+            cp -a "$source_dir/." "$publish_dir/"
+            touch "$publish_dir/.nojekyll"
+            git -C "$publish_dir" add --all
+            git -C "$publish_dir" commit -m "Prévisions WRF MeteoGalicia $(date -u +'%Y-%m-%d %H:%M UTC')"
+            if git -C "$publish_dir" push origin HEAD:data; then
+              echo "Prévisions publiées dans https://github.com/$REPOSITORY/tree/data" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "La branche data a changé ; nouvelle tentative $attempt/4."
+            sleep $((attempt * 2))
+          done
+          echo 'Échec après quatre tentatives concurrentes.' >&2
+          exit 1
