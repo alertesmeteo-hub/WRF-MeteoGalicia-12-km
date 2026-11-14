@@ -1,11 +1,11 @@
 {
  "model": {
   "name": "WRF-ARW MeteoGalicia 12 km",
-  "run_time": "2026-11-13T00:00:00Z",
+  "run_time": "2026-11-14T00:00:00Z",
   "source": "WRF-ARW 12 km de MeteoGalicia (Xunta de Galicia), réutilisation d'informations du secteur public avec mention de la source"
  },
- "generated_at": "2026-11-13T12:33:17Z",
- "model_run": "2026-11-13T00:00:00Z",
+ "generated_at": "2026-11-14T11:42:29Z",
+ "model_run": "2026-11-14T00:00:00Z",
  "departments": [
   "66"
  ]
